@@ -8,6 +8,10 @@ defaults:
 ray: false
 prefilter: false
 
+# Multi-worker distributed processing
+world_size: 1    # Total number of workers
+local_rank: 0    # Current worker rank (0 to world_size-1)
+
 hydra:
   output_subdir: null
   job:

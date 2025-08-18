@@ -13,10 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import io
 import logging
+import tarfile
 import tempfile
 import zipfile
-
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -29,19 +30,56 @@ import OpenEXR
 import torch
 
 from vipe.ext.lietorch import SE3
+from vipe.slam.system import SLAMOutput
 from vipe.streams.base import FrameAttribute, VideoFrame, VideoStream
 from vipe.utils.cameras import CameraType
 from vipe.utils.geometry import se3_matrix_to_se3
 from vipe.utils.visualization import VideoWriter
 
-
 logger = logging.getLogger(__name__)
+
+
+def _convert_pose_to_z_up_axis(pose_matrix: np.ndarray) -> np.ndarray:
+    transform = np.array([
+        [1,  0,  0],
+        [0, 0, 1],
+        [0, -1, 0]
+    ], dtype=np.float32)
+    
+    converted_pose = pose_matrix.copy()
+    
+    # Transform rotation: R' = T * R
+    converted_pose[:3, :3] = transform @ pose_matrix[:3, :3]
+    
+    # Transform translation: t' = T * t  
+    converted_pose[:3, 3] = transform @ pose_matrix[:3, 3]
+    
+    return converted_pose
+
+
+def _convert_points_to_z_up_axis(points: np.ndarray) -> np.ndarray:
+    transform = np.array([
+        [1,  0,  0],
+        [0,  0, 1],
+        [0,  -1,  0]
+    ], dtype=np.float32)
+    
+    return points @ transform.T
+
 
 
 @dataclass
 class ArtifactPath:
     base_path: Path
     artifact_name: str
+    
+    @property
+    def pcd_path(self) -> Path:
+        return self.base_path / f"{self.artifact_name}" / "pcd.npz"
+
+    @property
+    def rgbd_tar_path(self) -> Path:
+        return self.base_path / f"{self.artifact_name}" / "rgbd.tar"
 
     @property
     def rgb_path(self) -> Path:
@@ -333,6 +371,126 @@ def read_instance_phrases(instance_phrase_path: Path) -> dict[int, str]:
             idx, phrase = line.split(":")
             instance_phrases[int(idx)] = phrase.strip()
     return instance_phrases
+
+
+def save_pcd_artifacts(out_path: ArtifactPath, slam_output: SLAMOutput, z_up: bool = False) -> None:
+    """
+    Save point cloud as npz file.
+    
+    Args:
+        out_path: ArtifactPath for saving
+        slam_output: SLAMOutput containing point cloud data
+        coordinate_frame: "opencv" (default, -Y up) or "standard" (+Z up)
+    """
+    # Save point cloud as npz file.
+    pcd_xyz = slam_output.slam_map.dense_disp_xyz.cpu().numpy()
+    pcd_rgb = slam_output.slam_map.dense_disp_rgb.cpu().numpy()
+    pcd_rgb = pcd_rgb.reshape(-1, 3)
+    pcd_xyz = pcd_xyz.astype(np.float32)
+    
+    # Apply coordinate frame conversion if requested
+    if z_up:
+        pcd_xyz = _convert_points_to_z_up_axis(pcd_xyz)
+    
+    out_path.pcd_path.parent.mkdir(exist_ok=True, parents=True)
+    np.savez(out_path.pcd_path, coord=pcd_xyz, color=(pcd_rgb * 255).astype(np.uint8))
+
+def save_artifacts_as_tar(out_path: ArtifactPath, cached_final_stream: VideoStream, slam_output: SLAMOutput, z_up: bool = False) -> None:
+    """
+    Save RGB, depth, pose, and intrinsics in a single tar file and PCD separately.
+    
+    Args:
+        out_path: ArtifactPath for saving
+        cached_final_stream: VideoStream containing frame data
+        slam_output: SLAMOutput containing point cloud data
+    """
+    scene_name = out_path.artifact_name
+    
+    # Save point cloud as npz file (separate from tar)
+    save_pcd_artifacts(out_path, slam_output, z_up=z_up)
+    
+    # Create the rgbd.tar file
+    out_path.rgbd_tar_path.parent.mkdir(exist_ok=True, parents=True)
+    
+    with tarfile.open(out_path.rgbd_tar_path, "w") as tar:
+        # Process each frame in the stream
+        for frame_idx, frame_data in enumerate(cached_final_stream):
+            frame_id_str = f"{frame_idx:05d}"
+            
+            # Save RGB as JPG
+            if frame_data.rgb is not None:
+                rgb_data = (frame_data.rgb.cpu().numpy() * 255).astype(np.uint8)
+                _, rgb_buffer = cv2.imencode('.jpg', cv2.cvtColor(rgb_data, cv2.COLOR_RGB2BGR))
+                rgb_info = tarfile.TarInfo(name=f"{scene_name}/{frame_id_str}.rgb.jpg")
+                rgb_info.size = len(rgb_buffer)
+                tar.addfile(rgb_info, io.BytesIO(rgb_buffer.tobytes()))
+            
+            # Save depth as PNG (scaled by 1000.0, uint16)
+            depth_data = cached_final_stream.get_stream_attribute(FrameAttribute.METRIC_DEPTH)[frame_idx]
+            if depth_data is not None:
+                depth_scaled = (depth_data.cpu().numpy() * 1000.0).astype(np.uint16)
+                _, depth_buffer = cv2.imencode('.png', depth_scaled)
+                depth_info = tarfile.TarInfo(name=f"{scene_name}/{frame_id_str}.depth.png")
+                depth_info.size = len(depth_buffer)
+                tar.addfile(depth_info, io.BytesIO(depth_buffer.tobytes()))
+            
+            # Save pose as TXT (4x4 matrix)
+            pose_data = cached_final_stream.get_stream_attribute(FrameAttribute.POSE)[frame_idx]
+            if pose_data is not None:
+                pose_matrix = pose_data.matrix().cpu().numpy()
+                
+                # Apply coordinate frame conversion if requested
+                if z_up:
+                    pose_matrix = _convert_pose_to_z_up_axis(pose_matrix)
+                
+                pose_str = io.StringIO()
+                np.savetxt(pose_str, pose_matrix, fmt="%.6f")
+                pose_bytes = pose_str.getvalue().encode('utf-8')
+                pose_info = tarfile.TarInfo(name=f"{scene_name}/{frame_id_str}.pose.txt")
+                pose_info.size = len(pose_bytes)
+                tar.addfile(pose_info, io.BytesIO(pose_bytes))
+            
+            # Save intrinsics as TXT (3x3 matrix)
+            intrinsics_data = cached_final_stream.get_stream_attribute(FrameAttribute.INTRINSICS)[frame_idx]
+            if intrinsics_data is not None:
+                # Convert from [fx, fy, cx, cy] to 3x3 matrix
+                fx, fy, cx, cy = intrinsics_data.cpu().numpy()
+                intrinsics_matrix = np.array([
+                    [fx, 0.0, cx],
+                    [0.0, fy, cy],
+                    [0.0, 0.0, 1.0]
+                ])
+                intr_str = io.StringIO()
+                np.savetxt(intr_str, intrinsics_matrix, fmt="%.6f")
+                intr_bytes = intr_str.getvalue().encode('utf-8')
+                intr_info = tarfile.TarInfo(name=f"{scene_name}/{frame_id_str}.intr.txt")
+                intr_info.size = len(intr_bytes)
+                tar.addfile(intr_info, io.BytesIO(intr_bytes))
+
+    # Save Instance mask as zipped PNG files.
+    instance_list = [
+        (frame_idx, frame_data.instance)
+        for frame_idx, frame_data in enumerate(cached_final_stream)
+        if frame_data.instance is not None
+    ]
+    if len(instance_list) > 0:
+        out_path.mask_path.parent.mkdir(exist_ok=True, parents=True)
+        with zipfile.ZipFile(out_path.mask_path, "w", zipfile.ZIP_DEFLATED) as z:
+            for frame_idx, instance in instance_list:
+                _, mask_buffer = cv2.imencode(".png", instance.cpu().numpy().astype(np.uint8))
+                z.writestr(f"{frame_idx:05d}.png", mask_buffer.tobytes())
+
+    # Save Instance phrases as txt file.
+    instance_phrases_combined = {}
+    for frame_data in cached_final_stream:
+        assert isinstance(frame_data, VideoFrame)
+        if frame_data.instance_phrases is not None:
+            instance_phrases_combined.update(frame_data.instance_phrases)
+    if len(instance_phrases_combined) > 0:
+        out_path.mask_phrase_path.parent.mkdir(exist_ok=True, parents=True)
+        with out_path.mask_phrase_path.open("w") as f:
+            for idx, phrase in instance_phrases_combined.items():
+                f.write(f"{idx}: {phrase}\n")
 
 
 def save_artifacts(out_path: ArtifactPath, cached_final_stream: VideoStream) -> None:

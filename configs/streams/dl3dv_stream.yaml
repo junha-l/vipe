@@ -1,4 +1,4 @@
-instance: vipe.streams.directory_frames_stream.DirectoryFramesStreamList
+instance: vipe.streams.dl3dv_stream.DL3DVStreamList
 
 base_path: ??
 fps: 30.0

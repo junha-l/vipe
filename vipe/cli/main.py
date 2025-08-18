@@ -36,12 +36,21 @@ from vipe.utils.viser import run_viser
 )
 @click.option("--pipeline", "-p", default="default", help="Pipeline configuration to use (default: 'default')")
 @click.option("--visualize", "-v", is_flag=True, help="Enable visualization of intermediate results")
-def infer(video: Path, output: Path, pipeline: str, visualize: bool):
+@click.option("--z-up", "-z", is_flag=True, help="Use +Z up coordinate convention (default: -Y up)")
+@click.option("--artifacts-format", "-f", type=click.Choice(["original", "tar"]), default="original",
+              help="Artifacts saving format: 'original' (original ViPE) or 'tar'")
+def infer(video: Path, output: Path, pipeline: str, visualize: bool, z_up: bool, artifacts_format: str):
     """Run inference on a video file."""
 
     logger = configure_logging()
 
-    overrides = [f"pipeline={pipeline}", f"pipeline.output.path={output}", "pipeline.output.save_artifacts=true"]
+    overrides = [
+        f"pipeline={pipeline}", 
+        f"pipeline.output.path={output}", 
+        "pipeline.output.save_artifacts=true",
+        f"pipeline.output.z_up={str(z_up).lower()}",
+        f"pipeline.output.artifacts_format={artifacts_format}"
+    ]
     if visualize:
         overrides.append("pipeline.output.save_viz=true")
         overrides.append("pipeline.slam.visualize=true")

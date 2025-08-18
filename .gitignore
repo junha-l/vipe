@@ -167,3 +167,5 @@ vipe_results/
 /try_*.py
 /external/
 JIAHUI.md
+huggingface_cache/
+logs/

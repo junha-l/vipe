@@ -1,0 +1,8 @@
+ninja
+rerun-sdk
+python-pycg
+wheel 
+setuptools 
+build
+openexr
+gdown

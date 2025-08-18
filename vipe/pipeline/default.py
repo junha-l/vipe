@@ -15,7 +15,6 @@
 
 
 import logging
-import pickle
 
 from pathlib import Path
 
@@ -53,6 +52,17 @@ class DefaultAnnotationPipeline(Pipeline):
         self.out_path = Path(self.out_cfg.path)
         self.out_path.mkdir(exist_ok=True, parents=True)
         self.camera_type = CameraType(self.init_cfg.camera_type)
+
+    def should_filter(self, stream_name: str) -> bool:
+        if not self.out_cfg.skip_exists:
+            return False
+
+        artifact_path = io.ArtifactPath(self.out_path, stream_name)
+
+        if self.out_cfg.artifacts_format == "tar":
+            return artifact_path.rgbd_tar_path.exists() and artifact_path.pcd_path.exists()
+        else:
+            return artifact_path.meta_info_path.exists()
 
     def _add_init_processors(self, video_stream: VideoStream) -> ProcessedVideoStream:
         init_processors: list[StreamProcessor] = []
@@ -128,10 +138,11 @@ class DefaultAnnotationPipeline(Pipeline):
         for output_stream, artifact_path in zip(output_streams, artifact_paths):
             artifact_path.meta_info_path.parent.mkdir(exist_ok=True, parents=True)
             if self.out_cfg.save_artifacts:
-                logger.info(f"Saving artifacts to {artifact_path}")
-                io.save_artifacts(artifact_path, output_stream)
-                with artifact_path.meta_info_path.open("wb") as f:
-                    pickle.dump({"ba_residual": slam_output.ba_residual}, f)
+                logger.info(f"Saving artifacts to {artifact_path} using {self.out_cfg.artifacts_format} format")
+                if self.out_cfg.artifacts_format == "tar":
+                    io.save_artifacts_as_tar(artifact_path, output_stream, slam_output, z_up=self.out_cfg.z_up)
+                else:  # default to "individual"
+                    io.save_artifacts(artifact_path, output_stream)
 
             if self.out_cfg.save_viz:
                 save_projection_video(

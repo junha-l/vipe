@@ -36,9 +36,15 @@ output:
   skip_exists: false
 
   # Save artifacts and a info file
-  save_artifacts: false
+  save_artifacts: true 
+  
+  # Artifacts saving format: "original" (original ViPE format) or "tar" (save rgbd frame data into single tar)
+  artifacts_format: original
+  
+  # Use +Z up coordinate convention (default: false, uses -Y up)
+  z_up: false
 
   # Visualization videos to BASE_PATH/vipe/xxx.mp4
-  save_viz: true
+  save_viz: false
   viz_downsample: 2
   viz_attributes: [['rgb', 'instance'], ['depth', 'pcd']]
