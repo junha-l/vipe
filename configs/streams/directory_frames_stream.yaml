@@ -1,0 +1,8 @@
+instance: vipe.streams.directory_frames_stream.DirectoryFramesStreamList
+
+base_path: ??
+fps: 30.0
+frame_start: 0
+frame_end: -1
+frame_skip: 1
+cached: false
